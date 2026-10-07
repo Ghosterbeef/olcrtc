@@ -155,6 +155,7 @@ func (s *Session) onSubscriberConnectionStateChange(state webrtc.PeerConnectionS
 	case webrtc.PeerConnectionStateConnected:
 		s.subscriberReady.Store(true)
 		s.signalSubscriberConn()
+		s.requestKeyFrameOnTracks()
 	case webrtc.PeerConnectionStateDisconnected,
 		webrtc.PeerConnectionStateFailed,
 		webrtc.PeerConnectionStateClosed:
@@ -171,6 +172,7 @@ func (s *Session) onPublisherConnectionStateChange(state webrtc.PeerConnectionSt
 	switch state {
 	case webrtc.PeerConnectionStateConnected:
 		s.publisherReady.Store(true)
+		s.requestKeyFrameOnTracks()
 	case webrtc.PeerConnectionStateDisconnected,
 		webrtc.PeerConnectionStateFailed,
 		webrtc.PeerConnectionStateClosed:

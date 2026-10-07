@@ -146,6 +146,7 @@ func openControlStreamTimeout(
 	claims map[string]any,
 	timeout time.Duration,
 ) (*smux.Stream, string, string, error) {
+	logger.Infof("client: opening control stream for handshake (timeout=%v device=%s)", timeout, deviceID)
 	stream, err := session.OpenStream()
 	if err != nil {
 		return nil, "", "", fmt.Errorf("open control stream: %w", err)
@@ -169,6 +170,7 @@ func openControlStreamTimeout(
 		}
 		return nil, "", "", fmt.Errorf("handshake client: %w", err)
 	}
+	logger.Infof("client: control handshake completed successfully sessionID=%s peerID=%s", sessionID, peerID)
 	return stream, sessionID, peerID, nil
 }
 

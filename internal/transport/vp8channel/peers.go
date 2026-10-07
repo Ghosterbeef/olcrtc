@@ -290,6 +290,8 @@ func (p *streamTransport) peerSessionFor(epoch uint32) *peerSession {
 	}
 
 	logger.Infof("vp8channel: peer session created epoch=0x%08x peers=%d", epoch, p.peers.len())
+	// Send a fresh keyframe immediately upon new peer session creation
+	p.RequestKeyFrame()
 
 	// Pump outbound frames from this peer's queue into the writer.
 	go p.peerWriterPump(out, sess.done)

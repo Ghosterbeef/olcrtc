@@ -1,6 +1,8 @@
 package vp8channel
 
 import (
+	"time"
+
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
@@ -13,7 +15,11 @@ import (
 // packets; once this many newer packets pile up behind a hole, the missing
 // sequence is treated as genuinely lost and we advance, so a truly dropped
 // packet cannot stall delivery indefinitely.
-const reorderWindow = 256
+const (
+	reorderWindow   = 16
+	maxReorderGap   = 6
+	maxReorderDelay = 30 * time.Millisecond
+)
 
 // Reordered RTP packets normally carry an MTU-sized payload. Larger buffers
 // are not retained after delivery so one malformed packet cannot pin a large
@@ -43,10 +49,11 @@ func seqLess(a, b uint16) bool {
 // a live SFU). Buffering by sequence number and draining in order means only
 // genuine loss produces a gap.
 type reorderBuffer struct {
-	pkts    map[uint16]*rtp.Packet
-	free    []*rtp.Packet
-	nextSeq uint16
-	started bool
+	pkts         map[uint16]*rtp.Packet
+	free         []*rtp.Packet
+	nextSeq      uint16
+	started      bool
+	gapStartTime time.Time
 }
 
 func newReorderBuffer() *reorderBuffer {
@@ -61,10 +68,12 @@ func (b *reorderBuffer) push(pkt *rtp.Packet, deliver func(*rtp.Packet)) {
 	if !b.started {
 		b.started = true
 		b.nextSeq = pkt.SequenceNumber
+		logger.Debugf("vp8channel: reorder buffer started at seq=%d", pkt.SequenceNumber)
 	}
 	// Drop packets older than our current position: already delivered, or
 	// skipped past as lost.
 	if seqLess(pkt.SequenceNumber, b.nextSeq) {
+		logger.Debugf("vp8channel: reorder dropped late pkt seq=%d nextSeq=%d", pkt.SequenceNumber, b.nextSeq)
 		return
 	}
 	if old := b.pkts[pkt.SequenceNumber]; old != nil {
@@ -72,12 +81,57 @@ func (b *reorderBuffer) push(pkt *rtp.Packet, deliver func(*rtp.Packet)) {
 	}
 	b.pkts[pkt.SequenceNumber] = b.clone(pkt)
 
-	// Holding a full window behind a hole means the head sequence is
-	// genuinely lost: skip forward to the oldest buffered packet.
-	if len(b.pkts) > reorderWindow {
+	// If the new packet is far ahead of nextSeq, or the window is full, or the
+	// gap has timed out, the missing packets are genuinely lost: skip forward.
+	gap := uint16(pkt.SequenceNumber - b.nextSeq)
+	if gap > maxReorderGap || len(b.pkts) > reorderWindow || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
+		logger.Debugf("vp8channel: reorder skip trigger gap=%d queued=%d nextSeq=%d", gap, len(b.pkts), b.nextSeq)
 		b.skipToOldest()
+		b.gapStartTime = time.Time{}
 	}
+
+	before := b.nextSeq
 	b.drain(deliver)
+
+	// If remaining buffered packets have internal gaps exceeding limits or delay, advance through them.
+	for len(b.pkts) > 0 {
+		oldest := b.findOldest()
+		remGap := uint16(oldest - b.nextSeq)
+		if remGap > maxReorderGap || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
+			b.nextSeq = oldest
+			b.drain(deliver)
+		} else {
+			break
+		}
+	}
+
+	if before != b.nextSeq {
+		logger.Debugf("vp8channel: reorder delivered up to seq=%d (queued=%d)", b.nextSeq, len(b.pkts))
+	}
+
+	if len(b.pkts) > 0 {
+		if b.gapStartTime.IsZero() {
+			b.gapStartTime = time.Now()
+		}
+		logger.Debugf("vp8channel: reorder waiting for seq=%d, queued=%d latest=%d", b.nextSeq, len(b.pkts), pkt.SequenceNumber)
+	} else {
+		b.gapStartTime = time.Time{}
+	}
+}
+
+// flushTimeout forces delivery of buffered packets if waiting past maxReorderDelay.
+func (b *reorderBuffer) flushTimeout(deliver func(*rtp.Packet)) {
+	if len(b.pkts) == 0 {
+		return
+	}
+	if b.gapStartTime.IsZero() || time.Since(b.gapStartTime) >= maxReorderDelay {
+		logger.Debugf("vp8channel: reorder flushTimeout skipping to seq=%d (queued=%d)", b.findOldest(), len(b.pkts))
+		for len(b.pkts) > 0 {
+			b.nextSeq = b.findOldest()
+			b.drain(deliver)
+		}
+		b.gapStartTime = time.Time{}
+	}
 }
 
 // drain pops contiguous packets starting at nextSeq.
@@ -122,9 +176,7 @@ func (b *reorderBuffer) recycle(pkt *rtp.Packet) {
 	b.free = append(b.free, pkt)
 }
 
-// skipToOldest advances nextSeq to the lowest buffered sequence, abandoning a
-// lost packet so drain can make progress.
-func (b *reorderBuffer) skipToOldest() {
+func (b *reorderBuffer) findOldest() uint16 {
 	first := true
 	var oldest uint16
 	for seq := range b.pkts {
@@ -133,7 +185,15 @@ func (b *reorderBuffer) skipToOldest() {
 			first = false
 		}
 	}
-	b.nextSeq = oldest
+	return oldest
+}
+
+// skipToOldest advances nextSeq to the lowest buffered sequence, abandoning a
+// lost packet so drain can make progress.
+func (b *reorderBuffer) skipToOldest() {
+	if len(b.pkts) > 0 {
+		b.nextSeq = b.findOldest()
+	}
 }
 
 type vp8FrameState struct {
@@ -149,6 +209,7 @@ type vp8FrameState struct {
 // loss/reordering to avoid silently corrupting fragmented VP8 frames.
 func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 	if s.haveLastSeq && pkt.SequenceNumber != s.lastSeq+1 {
+		logger.Debugf("vp8channel: seq gap in processRTPPacket: got=%d want=%d", pkt.SequenceNumber, s.lastSeq+1)
 		s.frameValid = false
 		s.frameBuf = s.frameBuf[:0]
 	}
@@ -157,6 +218,7 @@ func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 
 	vp8Payload, err := s.vp8Pkt.Unmarshal(pkt.Payload)
 	if err != nil {
+		logger.Debugf("vp8channel: vp8 Unmarshal err: %v seq=%d len=%d", err, pkt.SequenceNumber, len(pkt.Payload))
 		s.frameValid = false
 		s.frameBuf = s.frameBuf[:0]
 		return nil
@@ -190,8 +252,10 @@ func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 	s.frameBuf = s.frameBuf[:0]
 	s.frameValid = false
 	if len(frame) >= epochHdrLen {
+		logger.Debugf("vp8channel: frame assembled len=%d seq=%d", len(frame), pkt.SequenceNumber)
 		return frame
 	}
+	logger.Debugf("vp8channel: frame too short len=%d < epochHdrLen seq=%d", len(frame), pkt.SequenceNumber)
 	return nil
 }
 
@@ -219,32 +283,64 @@ func (p *streamTransport) drainTrack(track *webrtc.TrackRemote) {
 func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 	var state vp8FrameState
 	reorder := newReorderBuffer()
-	buf := make([]byte, rtpBufSize)
 	var rtpCount, frameCount int
 
-	for {
-		n, _, err := track.Read(buf)
-		if err != nil {
-			logger.Infof("vp8channel: readVP8Track closed track=%s rtp=%d frames=%d err=%v",
-				track.ID(), rtpCount, frameCount, err)
-			return
-		}
-		rtpCount++
+	type readResult struct {
+		pkt *rtp.Packet
+		err error
+	}
+	pktCh := make(chan readResult, 64)
 
-		pkt := &rtp.Packet{}
-		if pkt.Unmarshal(buf[:n]) != nil {
-			continue
-		}
-
-		// Restore sequence order before assembly so SFU reordering is not
-		// mistaken for loss.
-		reorder.push(pkt, func(ordered *rtp.Packet) {
-			frame := state.processRTPPacket(ordered)
-			if frame == nil {
+	go func() {
+		buf := make([]byte, rtpBufSize)
+		for {
+			n, _, err := track.Read(buf)
+			if err != nil {
+				pktCh <- readResult{err: err}
 				return
 			}
-			frameCount++
-			p.handleIncomingFrame(frame)
-		})
+			pkt := &rtp.Packet{}
+			if err := pkt.Unmarshal(buf[:n]); err != nil {
+				continue
+			}
+			payload := make([]byte, len(pkt.Payload))
+			copy(payload, pkt.Payload)
+			pkt.Payload = payload
+
+			select {
+			case pktCh <- readResult{pkt: pkt}:
+			case <-p.closeCh:
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(30 * time.Millisecond)
+	defer ticker.Stop()
+
+	deliver := func(ordered *rtp.Packet) {
+		frame := state.processRTPPacket(ordered)
+		if frame == nil {
+			return
+		}
+		frameCount++
+		p.handleIncomingFrame(frame)
+	}
+
+	for {
+		select {
+		case <-p.closeCh:
+			return
+		case res := <-pktCh:
+			if res.err != nil {
+				logger.Infof("vp8channel: readVP8Track closed track=%s rtp=%d frames=%d err=%v",
+					track.ID(), rtpCount, frameCount, res.err)
+				return
+			}
+			rtpCount++
+			reorder.push(res.pkt, deliver)
+		case <-ticker.C:
+			reorder.flushTimeout(deliver)
+		}
 	}
 }

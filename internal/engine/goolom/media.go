@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
@@ -52,6 +53,7 @@ func newWebRTCAPI(resolver *net.Resolver) (*webrtc.API, error) {
 		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
 	}
 	apply(&settingEngine)
+	settingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
@@ -354,6 +356,47 @@ func parseICEURLs(server map[string]any) []string {
 	return urls
 }
 
+const (
+	yandexTURNURLTCP = "turn:turn.tel.yandex.net:443?transport=tcp"
+	yandexTURNURLUDP = "turn:turn.tel.yandex.net:443?transport=udp"
+)
+
+func isYandexTURN(urls []string) bool {
+	for _, u := range urls {
+		if strings.Contains(u, "turn.tel.yandex.net") {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureYandexTURNFallbacks(urls []string) []string {
+	if !isYandexTURN(urls) {
+		return urls
+	}
+	hasTCP443 := false
+	hasUDP443 := false
+	for _, u := range urls {
+		if strings.Contains(u, "turn.tel.yandex.net") {
+			if strings.Contains(u, "443") && strings.Contains(u, "transport=tcp") {
+				hasTCP443 = true
+			}
+			if strings.Contains(u, "443") && strings.Contains(u, "transport=udp") {
+				hasUDP443 = true
+			}
+		}
+	}
+	out := make([]string, len(urls), len(urls)+2)
+	copy(out, urls)
+	if !hasTCP443 {
+		out = append(out, yandexTURNURLTCP)
+	}
+	if !hasUDP443 {
+		out = append(out, yandexTURNURLUDP)
+	}
+	return out
+}
+
 func parseICEServer(rawServer any) (webrtc.ICEServer, bool) {
 	server, ok := rawServer.(map[string]any)
 	if !ok {
@@ -374,7 +417,11 @@ func parseICEServer(rawServer any) (webrtc.ICEServer, bool) {
 	if len(normalised) == 0 {
 		return webrtc.ICEServer{}, false
 	}
-	return normalised[0], true
+	res := normalised[0]
+	if res.Username != "" {
+		res.URLs = ensureYandexTURNFallbacks(res.URLs)
+	}
+	return res, true
 }
 
 func (s *Session) applyServerHelloConfig(serverHello map[string]any) {

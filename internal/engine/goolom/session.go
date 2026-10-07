@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
@@ -401,9 +402,11 @@ func (s *Session) AddVideoTrack(track webrtc.TrackLocal) error {
 	if pub == nil {
 		return nil
 	}
-	if _, err := pub.AddTrack(track); err != nil {
+	sender, err := pub.AddTrack(track)
+	if err != nil {
 		return fmt.Errorf("failed to add track: %w", err)
 	}
+	s.handlePublisherRTCP(sender, track)
 	return nil
 }
 
@@ -426,14 +429,58 @@ func (s *Session) attachPendingVideoTracks(pub *webrtc.PeerConnection) error {
 			attachErr = fmt.Errorf("add video track: %w", err)
 			return
 		}
-		s.drainPublisherRTCP(sender)
+		s.handlePublisherRTCP(sender, track)
 	})
 	return attachErr
 }
 
+type keyFrameRequester interface {
+	RequestKeyFrame()
+}
+
+func (s *Session) requestKeyFrameOnTracks() {
+	s.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
+		if r, ok := track.(keyFrameRequester); ok {
+			r.RequestKeyFrame()
+		}
+	})
+}
+
+// handlePublisherRTCP reads RTCP feedback the SFU sends for our published track.
+// Pion normally filters RTCP by media SSRC. However, Yandex Telemost SFU sends RTCP
+// PLI/FIR requests using its own internal SFU SSRC rather than the published track SSRC.
+// This reader unmarshals RTCP packets without filtering by SSRC, and triggers
+// RequestKeyFrame() on the track whenever a PLI or FIR packet is received.
+func (s *Session) handlePublisherRTCP(sender *webrtc.RTPSender, track webrtc.TrackLocal) {
+	if sender == nil {
+		return
+	}
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			n, _, err := sender.Read(rtcpBuf)
+			if err != nil {
+				return
+			}
+			pkts, err := rtcp.Unmarshal(rtcpBuf[:n])
+			if err != nil {
+				continue
+			}
+			for _, pkt := range pkts {
+				switch pkt.(type) {
+				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+					logger.Debugf("goolom: received keyframe request (%T), requesting keyframe", pkt)
+					if requester, ok := track.(keyFrameRequester); ok {
+						requester.RequestKeyFrame()
+					}
+				}
+			}
+		}
+	}()
+}
+
 // drainPublisherRTCP reads (and discards) RTCP feedback the SFU sends for our
-// published track. The read is required so the interceptor chain keeps
-// processing incoming RTCP; without an active reader it stalls.
+// published track. Retained for backwards compatibility.
 func (s *Session) drainPublisherRTCP(sender *webrtc.RTPSender) {
 	if sender == nil {
 		return

@@ -232,7 +232,7 @@ func (s *Session) sendLeave(uid string) bool {
 }
 
 func (s *Session) keepAlive(keepAliveCh <-chan struct{}) {
-	wsTicker := time.NewTicker(30 * time.Second)
+	wsTicker := time.NewTicker(10 * time.Second)
 	defer wsTicker.Stop()
 	appTicker := time.NewTicker(5 * time.Second)
 	defer appTicker.Stop()

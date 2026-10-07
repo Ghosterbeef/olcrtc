@@ -15,7 +15,7 @@ func (p *streamTransport) handleIncomingFrame(frame []byte) {
 		return
 	}
 	if frameToken != p.bindingToken {
-		logger.Debugf("vp8channel: incoming frame token mismatch got=0x%08x want=0x%08x", frameToken, p.bindingToken)
+		logger.Debugf("vp8channel: incoming frame token mismatch got=0x%08x want=0x%08x len=%d", frameToken, p.bindingToken, len(frame))
 		return
 	}
 	kcpPayload := frame[epochHdrLen:]
@@ -25,8 +25,12 @@ func (p *streamTransport) handleIncomingFrame(frame []byte) {
 	// Drop frames addressed to a different participant. dst==0 broadcasts are
 	// always accepted (bootstrap before the sender learns our epoch).
 	if !p.acceptsDst(dst) {
+		logger.Debugf("vp8channel: drop frame unaccepted dst=0x%08x local=0x%08x src=0x%08x", dst, p.localEpochValue(), src)
 		return
 	}
+
+	logger.Debugf("vp8channel: accept frame src=0x%08x dst=0x%08x payloadLen=%d isCtrl=%v srv=%v",
+		src, dst, len(kcpPayload), src&controlEpochFlag != 0, p.serverMode)
 
 	// Control-plane frames have the high bit set in the src epoch field.
 	// Route them to the control plane and never mix them with bulk data.
@@ -52,7 +56,7 @@ func (p *streamTransport) acceptsDst(dst uint32) bool {
 		return true
 	}
 	le := p.localEpochValue()
-	return dst == le || dst == (le|controlEpochFlag)
+	return dst == le || dst == (le | controlEpochFlag)
 }
 
 // handleSinglePeerData delivers only frames from the peer authenticated by the

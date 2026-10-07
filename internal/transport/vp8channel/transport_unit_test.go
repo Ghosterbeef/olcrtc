@@ -831,3 +831,91 @@ func TestSeqLessWrapAround(t *testing.T) {
 		}
 	}
 }
+
+func TestVP8KeyframeConformsToRFC7741(t *testing.T) {
+	if len(vp8Keepalive) < 10 {
+		t.Fatalf("vp8Keepalive too short: len=%d", len(vp8Keepalive))
+	}
+	// Byte 0: frame_type bit 0 must be 0 (keyframe)
+	frameType := vp8Keepalive[0] & 0x01
+	if frameType != 0 {
+		t.Fatalf("byte 0 bit 0 (frame_type) = %d, want 0 (keyframe)", frameType)
+	}
+	// Byte 0: show_frame bit 4 must be 1 (show_frame)
+	showFrame := (vp8Keepalive[0] & 0x10) >> 4
+	if showFrame != 1 {
+		t.Fatalf("byte 0 bit 4 (show_frame) = %d, want 1", showFrame)
+	}
+	// Start code sync bytes: 0x9D 0x01 0x2A
+	if vp8Keepalive[3] != 0x9D || vp8Keepalive[4] != 0x01 || vp8Keepalive[5] != 0x2A {
+		t.Fatalf("sync code = [%02x %02x %02x], want [9d 01 2a]",
+			vp8Keepalive[3], vp8Keepalive[4], vp8Keepalive[5])
+	}
+	// Dimensions in little-endian: 14 bits width, 14 bits height
+	width := binary.LittleEndian.Uint16(vp8Keepalive[6:8]) & 0x3fff
+	height := binary.LittleEndian.Uint16(vp8Keepalive[8:10]) & 0x3fff
+	if width == 0 || height == 0 {
+		t.Fatalf("invalid dimensions: width=%d, height=%d", width, height)
+	}
+	if !isVP8Keyframe(vp8Keepalive) {
+		t.Fatal("isVP8Keyframe(vp8Keepalive) = false, want true")
+	}
+}
+
+func TestRequestKeyFrameEmitsKeyframeSample(t *testing.T) {
+	var emitted [][]byte
+	var mu sync.Mutex
+
+	tr := &streamTransport{
+		bindingToken:  bindingToken("test-kf"),
+		localEpoch:    0x1234,
+		frameInterval: time.Millisecond * 20,
+		sampleWriter: func(b []byte) bool {
+			mu.Lock()
+			cp := make([]byte, len(b))
+			copy(cp, b)
+			emitted = append(emitted, cp)
+			mu.Unlock()
+			return true
+		},
+	}
+
+	tr.RequestKeyFrame()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(emitted) != 1 {
+		t.Fatalf("emitted samples = %d, want 1", len(emitted))
+	}
+	if !isVP8Keyframe(emitted[0]) {
+		t.Fatalf("emitted sample is not a valid VP8 keyframe: %v", emitted[0])
+	}
+	if tr.lastKeyframeNano.Load() == 0 {
+		t.Fatal("lastKeyframeNano was not updated")
+	}
+}
+
+func TestWrappedTrackImplementsKeyFrameRequester(t *testing.T) {
+	var requested atomic.Bool
+	tr := &streamTransport{
+		bindingToken:  bindingToken("test-wrapped"),
+		localEpoch:    0x5678,
+		frameInterval: time.Millisecond * 20,
+		sampleWriter: func(b []byte) bool {
+			requested.Store(true)
+			return true
+		},
+	}
+
+	wrapped := &vp8Track{
+		TrackLocalStaticSample: nil,
+		transport:              tr,
+	}
+
+	var requester KeyFrameRequester = wrapped
+	requester.RequestKeyFrame()
+
+	if !requested.Load() {
+		t.Fatal("wrapped.RequestKeyFrame() did not trigger sampleWriter")
+	}
+}

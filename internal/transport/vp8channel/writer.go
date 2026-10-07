@@ -55,6 +55,9 @@ func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	if p.sampleWriter != nil {
 		return p.sampleWriter(data)
 	}
+	if p.track == nil {
+		return false
+	}
 	return p.track.WriteSample(media.Sample{
 		Data:     data,
 		Duration: p.frameInterval,
@@ -62,15 +65,18 @@ func (p *streamTransport) writeSampleLocked(data []byte) bool {
 }
 
 // forceKeepalive emits a clean, fully-decodable VP8 keepalive keyframe at a
-// steady cadence even while bulk data is flowing. During a sustained bulk
-// transfer every emitted "frame" is the epoch header plus opaque KCP bytes,
-// which never forms a decodable VP8 keyframe. The SFU asks for a keyframe (PLI)
-// and, receiving none within its decode-timeout (~40 s), stops forwarding the
-// track to subscribers. The periodic bare keyframe keeps the SFU's decoder
-// satisfied.
+// steady cadence even while bulk data is flowing, or on demand when requested.
+// During a sustained bulk transfer every emitted "frame" is the epoch header plus
+// opaque KCP bytes, which never forms a decodable VP8 keyframe. The SFU asks for a
+// keyframe (PLI) and, receiving none within its decode-timeout (~40 s), stops
+// forwarding the track to subscribers. The periodic bare keyframe (every 1.5–2.0 s)
+// keeps the SFU's decoder satisfied.
 func (w *writerState) forceKeepalive() {
-	w.ticksSinceKeepalive++
-	if w.ticksSinceKeepalive >= w.forceKeepaliveEvery {
+	force := w.p.forceKeyframe.Swap(false)
+	lastNano := w.p.lastKeyframeNano.Load()
+	last := time.Unix(0, lastNano)
+	if force || lastNano == 0 || time.Since(last) >= forceKeepalivePeriod {
+		w.p.lastKeyframeNano.Store(time.Now().UnixNano())
 		w.ticksSinceKeepalive = 0
 		hdr := w.p.epochHeader()
 		_ = w.writeSample(hdr[:])
@@ -176,14 +182,12 @@ func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan str
 
 	// Inject a decodable VP8 keyframe on the same cadence writerLoop uses for
 	// the client->server path. The server's per-peer bulk path previously
-	// emitted only opaque KCP data frames, which never form a decodable VP8
+	// emitted only opaque KCP data frames, which never forms a decodable VP8
 	// keyframe: the SFU's decoder times out (~40s without a keyframe) and stops
 	// forwarding the server's track to the subscriber. The client side was
 	// kept alive by writerLoop.forceKeepalive; the server side had no
 	// equivalent, so the server->client direction collapsed first while the
 	// client->server direction kept flowing (issue #95).
-	keyframeEvery := max(int(forceKeepalivePeriod/p.frameInterval), 1)
-	ticksSinceKeyframe := 0
 	var batchBuf []byte
 	var pending *packetBuffer
 	defer func() {
@@ -199,9 +203,11 @@ func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan str
 		case <-done:
 			return
 		case <-ticker.C:
-			ticksSinceKeyframe++
-			if ticksSinceKeyframe >= keyframeEvery {
-				ticksSinceKeyframe = 0
+			force := p.forceKeyframe.Swap(false)
+			lastNano := p.lastKeyframeNano.Load()
+			last := time.Unix(0, lastNano)
+			if force || lastNano == 0 || time.Since(last) >= forceKeepalivePeriod {
+				p.lastKeyframeNano.Store(time.Now().UnixNano())
 				hdr := p.epochHeader()
 				_ = p.writeSampleLocked(hdr[:])
 			}

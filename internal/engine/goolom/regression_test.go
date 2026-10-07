@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
 // wsTestServer is an in-process WebSocket endpoint that counts the frames it
@@ -319,6 +321,27 @@ func TestDataChannelAccessorRaceFree(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+type fakeTrackWithKeyframe struct {
+	webrtc.TrackLocal
+	requested atomic.Bool
+}
+
+func (f *fakeTrackWithKeyframe) RequestKeyFrame() {
+	f.requested.Store(true)
+}
+
+func TestRequestKeyFrameOnTracks(t *testing.T) {
+	s := newTestSession()
+	fake := &fakeTrackWithKeyframe{}
+	s.StoreVideoTrack(fake)
+
+	s.requestKeyFrameOnTracks()
+
+	if !fake.requested.Load() {
+		t.Fatal("requestKeyFrameOnTracks did not invoke RequestKeyFrame")
+	}
 }
 
 func newTestSession() *Session {

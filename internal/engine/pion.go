@@ -35,7 +35,7 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 			return nil, fmt.Errorf("protected net: %w", err)
 		}
 	}
-	if opts.LoggerFactory == nil && !opts.IPv4Only && protectedNet == nil {
+	if opts.LoggerFactory == nil && !opts.IPv4Only && !opts.DisableMulticast && protectedNet == nil {
 		return nil, nil //nolint:nilnil // nil hook preserves SDK-owned pion settings
 	}
 
@@ -44,8 +44,14 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 			settings.LoggerFactory = opts.LoggerFactory
 		}
 		if opts.IPv4Only {
-			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+			settings.SetNetworkTypes([]webrtc.NetworkType{
+				webrtc.NetworkTypeUDP4,
+				webrtc.NetworkTypeTCP4,
+			})
 			settings.SetIPFilter(func(ip net.IP) bool { return ip.To4() != nil })
+		}
+		if opts.DisableMulticast {
+			settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		}
 		if protectedNet == nil {
 			return
@@ -53,9 +59,6 @@ func NewPionSettings(opts PionSettingsOptions) (PionSettings, error) {
 		settings.SetNet(protectedNet)
 		if opts.ProxyDialer {
 			settings.SetICEProxyDialer(protect.NewProxyDialer(opts.Resolver))
-		}
-		if opts.DisableMulticast {
-			settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		}
 	}, nil
 }

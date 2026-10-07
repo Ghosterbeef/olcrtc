@@ -12,6 +12,7 @@ const (
 // TestParseICEServerKeepsTURN locks in the issue #95 fix: the SFU-advertised
 // ICE server set must retain TURN relays, not just STUN. Stripping TURN left
 // symmetric/CGNAT mobile clients with no durable candidate pair.
+// It also tests that Yandex TURN servers ensure both TCP and UDP 443 fallback.
 func TestParseICEServerKeepsTURN(t *testing.T) {
 	cases := []struct {
 		name string
@@ -25,7 +26,12 @@ func TestParseICEServerKeepsTURN(t *testing.T) {
 				"username":   "user",
 				"credential": "pass",
 			},
-			want: []string{testTURNURL, defaultSTUNURL},
+			want: []string{
+				testTURNURL,
+				defaultSTUNURL,
+				"turn:turn.tel.yandex.net:443?transport=tcp",
+				"turn:turn.tel.yandex.net:443?transport=udp",
+			},
 		},
 		{
 			name: "turns kept",
@@ -34,7 +40,11 @@ func TestParseICEServerKeepsTURN(t *testing.T) {
 				"username":   "user",
 				"credential": "pass",
 			},
-			want: []string{"turns:turn.tel.yandex.net:5349"},
+			want: []string{
+				"turns:turn.tel.yandex.net:5349",
+				"turn:turn.tel.yandex.net:443?transport=tcp",
+				"turn:turn.tel.yandex.net:443?transport=udp",
+			},
 		},
 		{
 			name: "stun only kept",

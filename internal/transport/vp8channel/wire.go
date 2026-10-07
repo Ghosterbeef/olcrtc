@@ -5,12 +5,34 @@ import (
 	"encoding/binary"
 )
 
-// vp8Keepalive is a minimal valid VP8 keyframe. It heads every frame we emit
-// so an SFU that validates the bitstream keeps forwarding the track.
+// vp8Keepalive is a minimal valid VP8 keyframe conforming to RFC 7741.
+// It heads every frame we emit so an SFU that validates the bitstream keeps
+// forwarding the track.
+//
+// VP8 uncompressed header structure (RFC 7741):
+// - Byte 0: frame_type = 0 (bit 0 is 0), version = 0 (bits 1-3), show_frame = 1 (bit 4), 3 bits part size
+// - Bytes 1-2: 16 bits first partition size
+// - Bytes 3-5: Start code sync bytes 0x9D 0x01 0x2A
+// - Bytes 6-7: 16-bit little-endian width (14-bit width = 16px, 2-bit scale = 0)
+// - Bytes 8-9: 16-bit little-endian height (14-bit height = 16px, 2-bit scale = 0)
 var vp8Keepalive = []byte{ //nolint:gochecknoglobals // package-level state intentional
 	0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00,
 	0x10, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85, 0x88,
 	0x99, 0x84, 0x88, 0xfc,
+}
+
+// isVP8Keyframe reports whether data begins with a valid VP8 uncompressed keyframe header
+// per RFC 7741.
+func isVP8Keyframe(data []byte) bool {
+	if len(data) < 10 {
+		return false
+	}
+	// bit 0 is frame_type: 0 for keyframe, 1 for interframe
+	if (data[0] & 0x01) != 0 {
+		return false
+	}
+	// start code sync bytes
+	return data[3] == 0x9D && data[4] == 0x01 && data[5] == 0x2A
 }
 
 // KCP data frames are disguised as valid VP8 frames so Telemost SFU lets them

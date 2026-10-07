@@ -1,38 +1,47 @@
 // Package vp8channel disguises a KCP-based byte transport as a stream of
 // valid VP8 keyframes so SFUs that validate bitstream conformance let the
-// payload through. The package owns its own KCP framing; the per-message
-// fragment/ack machinery used by videochannel/seichannel is unnecessary
-// here because KCP already provides ordered, reliable delivery.
+// traffic through.
 //
-// The wire layout, the epoch/binding header and the batching format are
-// documented in wire.go. Each transport runs two independent KCP planes -
-// bulk data and control - so handshake and liveness traffic never queues
-// behind a large write.
+// Background:
 //
-// # Peer restart detection
+// The videochannel transport uses plain WebRTC DataChannels for bytes and an
+// H.264 video track purely for pacing / timing. Some SFUs (notably Yandex
+// Telemost / Goolom) enforce server-side validation of the video payload: if
+// the bitstream does not decode as valid video, the SFU drops frames or drops
+// the track entirely. In addition, Telemost does not support arbitrary binary
+// traffic on its DataChannels reliably.
 //
-// A client binds to the server epoch authenticated by the encrypted handshake
-// and normally keeps it until the provider reconnects. When a frame arrives
-// from a different epoch after the bound peer has been silent longer than
-// peerRestartGrace, that COULD mean the server restarted and rejoined the SFU -
-// but in a shared room it just as easily means an unrelated participant (a
-// second olcrtc client) joined or reconnected and the SFU is broadcasting its
-// epoch to everyone. Epoch churn alone cannot tell the two apart.
+// vp8channel takes the opposite approach:
 //
-// So a rebuild also requires corroboration: linkUnhealthy, pushed in by the
-// client's own control-plane liveness loop through NotifyLinkHealth. A real
-// server restart kills that session-specific link almost immediately, so
-// genuine restarts still recover fast, while a stranger's epoch with our own
-// control plane healthy is ignored and no longer tears down a working provider.
+//   - No DataChannels: bytes travel as RTP payloads on a VP8 video track.
+//   - Every emitted RTP packet is preceded by a minimal, valid VP8 uncompressed
+//     header declaring a tiny keyframe (16x16, 1 macroblock). This passes SFU
+//     inspection and decoder checks.
+//   - Reliable delivery and ordering are provided by KCP running ON TOP OF the
+//     VP8 stream. Packet loss is recovered by KCP ARQ, not WebRTC NACK.
+//   - Flow control is handled by KCP's congestion window plus a token bucket.
+//   - Addressing: every frame carries an epoch header tagging the sender
+//     (src) and destination (dst) session. On multi-client servers, dst lets
+//     the server direct downlink to one peer even though the SFU forwards
+//     every packet to every subscriber.
 //
-// Recovery runs the full provider rebuild (stream.Reconnect), the same path
-// control-liveness loss uses, rather than a bare re-handshake: the restarted
-// server is a fresh SFU participant, so re-handshaking over the old media
-// path only times out. The provider's reconnect callback then rotates our
-// epoch, resets the peer latch and drives a fresh handshake. Acting on the
-// epoch change recovers in seconds instead of waiting out the relaxed
-// control-liveness window (~70s, issue #105). The rebuild fires exactly once
-// per restart; the flag clears when the next peer latches.
+// Dual-plane architecture:
+//
+// The transport runs two independent KCP planes over the shared video track:
+//
+//   - Data plane: bulk byte stream, paced by writerLoop / peerWriterPump,
+//     sized for high throughput.
+//   - Control plane: handshake, ping/pong, and session liveness. Tiny frames,
+//     drained ahead of bulk data, never shaped.
+//
+// Wire layout:
+//
+//	[0..20]   vp8Keepalive (valid VP8 keyframe, passes SFU inspection)
+//	[20..24]  binding token derived from client-id (big-endian uint32)
+//	[24..28]  src epoch (big-endian uint32; high bit set for control frames)
+//	[28..32]  dst epoch (big-endian uint32; 0 = broadcast)
+//	[32..36]  CRC32(token || src || dst)
+//	[36..]    KCP packet payload (or OLKB-batched KCP packets)
 package vp8channel
 
 import (
@@ -69,8 +78,8 @@ const (
 	keepaliveIdlePeriod      = 100 * time.Millisecond
 	// forceKeepalivePeriod is how often a bare, fully decodable VP8 keyframe
 	// is injected even while bulk data flows, so the SFU decoder never times
-	// out and stops forwarding the track.
-	forceKeepalivePeriod = 2 * time.Second
+	// out and stops forwarding the track. Fallback ticker interval (1.5s).
+	forceKeepalivePeriod = 1500 * time.Millisecond
 	// defaultPeerRestartGrace is how long the latched peer must be silent
 	// before a frame from a different epoch is read as a server restart. The
 	// server emits a decodable keepalive every ~2s, so a few missed beats is
@@ -90,6 +99,26 @@ var (
 // must be able to send as soon as the subscriber PC is up, which is what the
 // subscriber-aware extension adds on top of the shared video session.
 type videoSession = common.SubscriberVideoSession
+
+// KeyFrameRequester is implemented by tracks or transports that can generate
+// an immediate keyframe on demand (e.g. upon RTCP PLI/FIR).
+type KeyFrameRequester interface {
+	RequestKeyFrame()
+}
+
+// vp8Track wraps *webrtc.TrackLocalStaticSample and implements KeyFrameRequester
+// so RTCP PLI/FIR handlers can signal keyframe generation directly.
+type vp8Track struct {
+	*webrtc.TrackLocalStaticSample
+	transport *streamTransport
+}
+
+// RequestKeyFrame forwards the keyframe request to the transport.
+func (t *vp8Track) RequestKeyFrame() {
+	if t.transport != nil {
+		t.transport.RequestKeyFrame()
+	}
+}
 
 type streamTransport struct {
 	common.Lifecycle
@@ -156,6 +185,10 @@ type streamTransport struct {
 
 	peerConfirmed atomic.Bool
 
+	// forceKeyframe signals the writer to emit a fresh VP8 keyframe on demand.
+	forceKeyframe    atomic.Bool
+	lastKeyframeNano atomic.Int64
+
 	// shaper applies the optional traffic policy to the bulk data path only;
 	// the control plane must stay unpaced.
 	shaper *transport.Shaper
@@ -202,7 +235,12 @@ func New(ctx context.Context, cfg transport.Config) (transport.Transport, error)
 
 	tr := newStreamTransport(stream, track, cfg, opts)
 
-	if err := stream.AddTrack(track); err != nil {
+	wrappedTrack := &vp8Track{
+		TrackLocalStaticSample: track,
+		transport:              tr,
+	}
+
+	if err := stream.AddTrack(wrappedTrack); err != nil {
 		return nil, fmt.Errorf("attach local video track: %w", err)
 	}
 	stream.SetTrackHandler(tr.handleRemoteTrack)
@@ -244,6 +282,19 @@ func newStreamTransport(
 	return tr
 }
 
+// RequestKeyFrame forces the VP8 channel to emit a decodable keyframe
+// immediately and resets the periodic keyframe timer.
+func (p *streamTransport) RequestKeyFrame() {
+	p.forceKeyframe.Store(true)
+	p.emitKeyframe()
+}
+
+func (p *streamTransport) emitKeyframe() {
+	hdr := p.epochHeader()
+	_ = p.writeSampleLocked(hdr[:])
+	p.lastKeyframeNano.Store(time.Now().UnixNano())
+}
+
 // Connect brings up the provider, both KCP planes and the paced writer.
 func (p *streamTransport) Connect(ctx context.Context) error {
 	connectCtx, cancel := context.WithTimeout(ctx, defaultConnectTimeout)
@@ -281,6 +332,9 @@ func (p *streamTransport) Connect(ctx context.Context) error {
 			go p.sweepPeers()
 		}
 	})
+
+	// Emit initial keyframe immediately on connect so the SFU starts forwarding
+	p.RequestKeyFrame()
 
 	return nil
 }
@@ -363,6 +417,8 @@ func (p *streamTransport) ConfirmPeer(peerID string) error {
 	p.peerRestarting.Store(false)
 	p.peerConfirmed.Store(true)
 	logger.Infof("vp8channel: authenticated peer epoch=0x%08x", epoch)
+	// Immediately generate and send a keyframe on authenticated peer
+	p.RequestKeyFrame()
 	return nil
 }
 
@@ -378,6 +434,7 @@ func (p *streamTransport) Close() error {
 		if p.writerUp.Load() {
 			<-p.writerDone
 		}
+
 		if err := p.stream.Close(); err != nil {
 			return fmt.Errorf("close stream: %w", err)
 		}
