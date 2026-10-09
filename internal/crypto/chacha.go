@@ -4,6 +4,8 @@
 // from one PSK. Records use XChaCha20-Poly1305 with a random sender prefix and
 // monotonic counter. Authenticated records pass through a bounded per-prefix
 // replay window shared by every connection using the KeySet.
+// Connections on parallel channels (data, control, peer routing) should fork
+// the KeySet so each connection has an independent sender prefix and counter.
 package crypto
 
 import (
@@ -119,7 +121,7 @@ type replayCache struct {
 type KeySet struct {
 	send    sealState
 	receive cipher.AEAD
-	replay  replayCache
+	replay  *replayCache
 }
 
 // NewKeySet derives directional v2 keys from a 32-byte PSK and selects them by role.
@@ -167,12 +169,31 @@ func newKeySetForRole(clientKey, serverKey [chacha20poly1305.KeySize]byte, role 
 	keys := &KeySet{
 		send:    sealState{aead: sendAEAD},
 		receive: receiveAEAD,
-		replay:  replayCache{senders: make(map[[noncePrefixSize]byte]*replayState, maxReplaySenders)},
+		replay:  &replayCache{senders: make(map[[noncePrefixSize]byte]*replayState, maxReplaySenders)},
 	}
 	if _, err := rand.Read(keys.send.prefix[:]); err != nil {
 		return nil, fmt.Errorf("seed sender nonce prefix: %w", err)
 	}
 	return keys, nil
+}
+
+// Fork derives an independent KeySet sharing the directional AEAD ciphers
+// and the shared replay protection, but possessing its own random sender
+// prefix and atomic counter. This prevents counter jumps and replay window
+// stalls between parallel channels (e.g. bulk data vs control) or distinct peers.
+func (k *KeySet) Fork() (*KeySet, error) {
+	if k == nil {
+		return nil, nil
+	}
+	forked := &KeySet{
+		send:    sealState{aead: k.send.aead},
+		receive: k.receive,
+		replay:  k.replay,
+	}
+	if _, err := rand.Read(forked.send.prefix[:]); err != nil {
+		return nil, fmt.Errorf("seed forked sender nonce prefix: %w", err)
+	}
+	return forked, nil
 }
 
 // Seal allocates and seals one v2 record with aad.

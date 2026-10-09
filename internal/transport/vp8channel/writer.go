@@ -7,6 +7,18 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+const (
+	maxBatchSampleSize    = 4 * 1024
+	defaultSampleInterval = 2 * time.Millisecond
+)
+
+func (p *streamTransport) sampleInterval() time.Duration {
+	if p.frameInterval > 0 && p.frameInterval < defaultSampleInterval {
+		return p.frameInterval
+	}
+	return defaultSampleInterval
+}
+
 // writerState holds the per-loop bookkeeping for writerLoop, extracted so the
 // loop body stays within cognitive-complexity limits.
 type writerState struct {
@@ -60,7 +72,7 @@ func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	}
 	return p.track.WriteSample(media.Sample{
 		Data:     data,
-		Duration: p.frameInterval,
+		Duration: p.sampleInterval(),
 	}) == nil
 }
 
@@ -110,6 +122,9 @@ func (w *writerState) drainControl() bool {
 
 // drainData sends one batched data frame, or a keepalive when idle.
 func (w *writerState) drainData() {
+	if w.p.serverMode {
+		return // Server bulk data is handled per-peer by peerWriterPump
+	}
 	frame := w.pendingData
 	w.pendingData = nil
 	if frame == nil {
@@ -133,8 +148,8 @@ func (w *writerState) drainData() {
 		frame.release()
 		return
 	}
-	sample, pending := w.p.batchSampleFrom(w.p.data.out, frame, w.batchBuf[:0])
-	w.pendingData = pending
+	var sample []byte
+	sample, w.pendingData = w.p.batchSampleFrom(w.p.data.out, frame, w.batchBuf[:0])
 	_ = w.writeSample(sample)
 	w.batchBuf = sample[:0]
 }
@@ -142,13 +157,14 @@ func (w *writerState) drainData() {
 func (p *streamTransport) writerLoop() {
 	defer close(p.writerDone)
 
-	ticker := time.NewTicker(p.frameInterval)
+	interval := p.sampleInterval()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	w := &writerState{
 		p:                   p,
-		keepaliveEvery:      max(int(keepaliveIdlePeriod/p.frameInterval), 1),
-		forceKeepaliveEvery: max(int(forceKeepalivePeriod/p.frameInterval), 1),
+		keepaliveEvery:      max(int(keepaliveIdlePeriod/interval), 1),
+		forceKeepaliveEvery: max(int(forceKeepalivePeriod/interval), 1),
 	}
 	defer w.releasePending()
 
@@ -170,24 +186,15 @@ func (p *streamTransport) writerLoop() {
 }
 
 // peerWriterPump drains a peer's outbound KCP queue and writes frames to the
-// shared video track on the same frame ticker writerLoop uses for the
-// client->server path, batching queued frames into one VP8 sample per tick.
-// Draining on the ticker (rather than emitting each frame the instant it is
-// queued) keeps the per-peer writes interleaved with the keyframe injection
-// below and lets batchSampleFrom coalesce segments into full samples. Stops
-// when the peer session is released or the transport shuts down.
+// shared video track on the paced sample interval, batching queued frames
+// into small VP8 samples per tick. Small samples prevent multi-packet frame
+// fragmentation and token bucket drops on the SFU. Stops when the peer
+// session is released or the transport shuts down.
 func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan struct{}) {
-	ticker := time.NewTicker(p.frameInterval)
+	interval := p.sampleInterval()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Inject a decodable VP8 keyframe on the same cadence writerLoop uses for
-	// the client->server path. The server's per-peer bulk path previously
-	// emitted only opaque KCP data frames, which never forms a decodable VP8
-	// keyframe: the SFU's decoder times out (~40s without a keyframe) and stops
-	// forwarding the server's track to the subscriber. The client side was
-	// kept alive by writerLoop.forceKeepalive; the server side had no
-	// equivalent, so the server->client direction collapsed first while the
-	// client->server direction kept flowing (issue #95).
 	var batchBuf []byte
 	var pending *packetBuffer
 	defer func() {
@@ -244,7 +251,7 @@ func (p *streamTransport) canBatch(frame []byte) bool {
 }
 
 // batchSampleFrom coalesces up to batchSize KCP frames drained from src into a
-// single VP8 sample, bounded by defaultMaxPayloadSize. The shared writerLoop
+// single VP8 sample, bounded by maxBatchSampleSize. The shared writerLoop
 // drains the single-peer outbound queue; per-peer pumps drain their own queue
 // through the same batching so the server->client path is built identically to
 // the client.
@@ -274,7 +281,7 @@ func (p *streamTransport) batchSampleFrom(
 				continue
 			}
 			payload := frame.data[epochHdrLen:]
-			if len(sample)+2+len(payload) > defaultMaxPayloadSize {
+			if len(sample)+2+len(payload) > maxBatchSampleSize {
 				return sample, frame
 			}
 			sample = appendBatchPacket(sample, payload)
@@ -290,8 +297,8 @@ func (p *streamTransport) prepareBatchBuffer(dst []byte, src <-chan *packetBuffe
 	packetSize := len(first) - epochHdrLen
 	packetCount := min(p.batchSize, len(src)+1)
 	want := epochHdrLen + len(kcpBatchMagic) + packetCount*(2+packetSize)
-	if want > defaultMaxPayloadSize {
-		want = defaultMaxPayloadSize
+	if want > maxBatchSampleSize {
+		want = maxBatchSampleSize
 	}
 	if cap(dst) < want {
 		return make([]byte, 0, want)

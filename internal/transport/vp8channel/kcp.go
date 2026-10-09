@@ -22,16 +22,13 @@ const (
 	// clamped. Stay below that with headroom for KCP overhead (24 bytes).
 	kcpMTU = 1400
 
-	// Send/receive window in segments. Bulk data runs on its own KCP session,
-	// isolated from the control plane (ping/pong has a separate startKCP and is
-	// drained with priority by writerLoop), so a large data window no longer
-	// starves control liveness the way it did before that split (issue #95).
-	// One VP8 frame can carry many KCP segments and ACKs only trickle back at
-	// frame cadence, so a generous window is what keeps the policed path full
-	// and lets throughput reach the SFU's real ceiling (~10 Mbit on Telemost)
-	// instead of being clamped to a fraction of it.
-	kcpSndWnd = 4096
-	kcpRcvWnd = 4096
+	// Send/receive window in segments. Sized to match the BDP (bandwidth-delay
+	// product) of the SFU channel (~20 Mbps @ 50ms RTT = ~120KB = ~90 segments)
+	// with moderate headroom. Bounding the window prevents massive bufferbloat
+	// in the outbound queue that would artificially inflate RTT and trigger
+	// premature retransmissions.
+	kcpSndWnd = 256
+	kcpRcvWnd = 256
 
 	// Length prefix for our message framing on top of KCP stream mode.
 	// We use stream mode because UDPSession.Write fragments messages > MSS
@@ -283,9 +280,18 @@ func (p *kcpPlane) close() {
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
 
+	if p.closed {
+		return
+	}
 	p.closed = true
 
-	if rt := p.get(); rt != nil {
+	p.mu.Lock()
+	rt := p.rt
+	p.rt = nil
+	p.mu.Unlock()
+
+	if rt != nil {
 		rt.close()
 	}
+	p.drain()
 }

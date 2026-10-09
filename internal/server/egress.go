@@ -56,7 +56,8 @@ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request Conn
 	if _, err := stream.Write([]byte{tunnelcore.ConnectAckOK}); err != nil {
 		return
 	}
-	counts, _ := tunnelcore.CopyBidirectional(ctx, stream, conn)
+	counts, err := tunnelcore.CopyBidirectional(ctx, stream, conn)
+	logger.Infof("sid=%d CopyBidirectional done counts=%+v err=%v", stream.ID(), counts, err)
 	if s.onTraffic != nil {
 		s.onTraffic(sessionID, addr, counts.LeftToRight, counts.RightToLeft)
 	}

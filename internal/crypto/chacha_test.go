@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -150,6 +151,50 @@ func TestReplayAcceptsOutOfOrderAcrossPlanes(t *testing.T) {
 	}
 	if _, err := server.Open(data, []byte(testDataAAD)); err != nil {
 		t.Fatalf("Open(counter 1) error = %v", err)
+	}
+}
+
+func TestForkIsolatesParallelPlanesReplayWindow(t *testing.T) {
+	client, server := newKeyPair(t)
+	dataSender, err := client.Fork()
+	if err != nil {
+		t.Fatalf("Fork(data) error = %v", err)
+	}
+	controlSender, err := client.Fork()
+	if err != nil {
+		t.Fatalf("Fork(control) error = %v", err)
+	}
+
+	// Data sender queues 100 records
+	dataRecords := make([][]byte, 100)
+	for i := range dataRecords {
+		var sealErr error
+		dataRecords[i], sealErr = dataSender.Seal([]byte(fmt.Sprintf("data-%d", i)), []byte(testDataAAD))
+		if sealErr != nil {
+			t.Fatalf("Seal(data %d) error = %v", i, sealErr)
+		}
+	}
+
+	// Control sender sends 1 record (e.g. ping)
+	controlRecord, err := controlSender.Seal([]byte("ping"), []byte(testControlAAD))
+	if err != nil {
+		t.Fatalf("Seal(control) error = %v", err)
+	}
+
+	// Prioritized delivery: control arrives at server FIRST
+	if _, err := server.Open(controlRecord, []byte(testControlAAD)); err != nil {
+		t.Fatalf("Open(control) error = %v", err)
+	}
+
+	// Then data records 0..99 arrive. None must be dropped as ErrReplayTooOld!
+	for i, record := range dataRecords {
+		got, err := server.Open(record, []byte(testDataAAD))
+		if err != nil {
+			t.Fatalf("Open(data %d) error = %v (replay window collision)", i, err)
+		}
+		if string(got) != fmt.Sprintf("data-%d", i) {
+			t.Fatalf("Open(data %d) = %q, want %q", i, got, fmt.Sprintf("data-%d", i))
+		}
 	}
 }
 

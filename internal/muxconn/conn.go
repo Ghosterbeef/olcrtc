@@ -177,13 +177,25 @@ func (c *Conn) sendDeadline() time.Duration {
 	return writeReadyTimeout
 }
 
+func forkKeys(keys *crypto.KeySet) *crypto.KeySet {
+	if keys == nil {
+		return nil
+	}
+	forked, err := keys.Fork()
+	if err != nil {
+		logger.Warnf("muxconn: failed to fork keyset: %v", err)
+		return keys
+	}
+	return forked
+}
+
 // New wires a Conn over the given transport. Push must be set as the
 // transport's OnData callback before this conn is used.
 func New(ln transport.Transport, keys *crypto.KeySet) *Conn {
 	return &Conn{
 		ln:      ln,
 		send:    ln.Send,
-		keys:    keys,
+		keys:    forkKeys(keys),
 		aad:     []byte(dataRecordAAD),
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
@@ -202,7 +214,7 @@ func NewControl(ln transport.Transport, keys *crypto.KeySet) *Conn {
 		ln:      ln,
 		send:    cp.ControlSend,
 		canSend: cp.ControlCanSend,
-		keys:    keys,
+		keys:    forkKeys(keys),
 		aad:     []byte(controlRecordAAD),
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
@@ -218,7 +230,7 @@ func NewPeer(ln transport.PeerTransport, keys *crypto.KeySet, peerID string) *Co
 		send: func(data []byte) error {
 			return ln.SendTo(peerID, data)
 		},
-		keys:    keys,
+		keys:    forkKeys(keys),
 		aad:     []byte(dataRecordAAD),
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
@@ -246,7 +258,7 @@ func NewPeerControlUnbound(ln transport.Transport, keys *crypto.KeySet, peerID s
 		canSend: func() bool {
 			return cp.ControlPeerCanSend(peerID)
 		},
-		keys:    keys,
+		keys:    forkKeys(keys),
 		aad:     []byte(controlRecordAAD),
 		in:      make(chan *[]byte, inboundQueue),
 		closeCh: make(chan struct{}),
@@ -274,6 +286,7 @@ func (c *Conn) Push(ciphertext []byte) {
 		releaseFrameBuf(bufPtr)
 		return
 	}
+	logger.Debugf("muxconn Push: ptLen=%d aad=%s", len(pt), string(c.aad))
 	select {
 	case c.in <- bufPtr:
 	case <-c.closeCh:

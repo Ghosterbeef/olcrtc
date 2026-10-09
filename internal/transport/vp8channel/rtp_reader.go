@@ -17,7 +17,8 @@ import (
 // packet cannot stall delivery indefinitely.
 const (
 	reorderWindow   = 256
-	maxReorderDelay = 40 * time.Millisecond
+	maxReorderGap   = 16
+	maxReorderDelay = 10 * time.Millisecond
 )
 
 // Reordered RTP packets normally carry an MTU-sized payload. Larger buffers
@@ -80,12 +81,25 @@ func (b *reorderBuffer) push(pkt *rtp.Packet, deliver func(*rtp.Packet)) {
 
 	// Holding a full window behind a hole, or waiting longer than maxReorderDelay
 	// for the missing packet, means the head sequence is genuinely lost: skip forward.
-	if len(b.pkts) > reorderWindow || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
+	gap := uint16(pkt.SequenceNumber - b.nextSeq)
+	if gap > maxReorderGap || len(b.pkts) > reorderWindow || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
 		b.skipToOldest()
 		b.gapStartTime = time.Time{}
 	}
 
 	b.drain(deliver)
+
+	// Advance through remaining internal gaps if they exceed limit or timed out
+	for len(b.pkts) > 0 {
+		oldest := b.findOldest()
+		remGap := uint16(oldest - b.nextSeq)
+		if remGap > maxReorderGap || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
+			b.nextSeq = oldest
+			b.drain(deliver)
+		} else {
+			break
+		}
+	}
 
 	if len(b.pkts) > 0 {
 		if b.gapStartTime.IsZero() {
@@ -164,27 +178,28 @@ func (b *reorderBuffer) findOldest() uint16 {
 	return oldest
 }
 
-// skipToOldest advances nextSeq to the lowest buffered sequence, abandoning a
-// lost packet so drain can make progress.
 func (b *reorderBuffer) skipToOldest() {
-	if len(b.pkts) > 0 {
-		b.nextSeq = b.findOldest()
+	if len(b.pkts) == 0 {
+		return
 	}
+	b.nextSeq = b.findOldest()
 }
 
+// vp8FrameState tracks the packet-by-packet reassembly of a single VP8 frame.
 type vp8FrameState struct {
-	vp8Pkt      codecs.VP8Packet
 	frameBuf    []byte
-	lastSeq     uint16
-	haveLastSeq bool
 	frameValid  bool
+	haveLastSeq bool
+	lastSeq     uint16
+	vp8Pkt      codecs.VP8Packet
 }
 
-// processRTPPacket returns a complete VP8 frame payload when fully assembled,
-// nil otherwise. The result remains valid until the next call. Detects packet
+// processRTPPacket reassembles contiguous RTP packets into full frames.
+// Any sequence gap discards the partially-assembled frame so an upstream
 // loss/reordering to avoid silently corrupting fragmented VP8 frames.
 func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 	if s.haveLastSeq && pkt.SequenceNumber != s.lastSeq+1 {
+		logger.Warnf("vp8channel: rtp seq gap got=%d want=%d bufLen=%d", pkt.SequenceNumber, s.lastSeq+1, len(s.frameBuf))
 		s.frameValid = false
 		s.frameBuf = s.frameBuf[:0]
 	}
@@ -226,6 +241,7 @@ func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 	s.frameBuf = s.frameBuf[:0]
 	s.frameValid = false
 	if len(frame) >= epochHdrLen {
+		logger.Debugf("vp8channel: frame reassembled len=%d seq=%d", len(frame), pkt.SequenceNumber)
 		return frame
 	}
 	return nil
@@ -261,7 +277,7 @@ func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 		pkt *rtp.Packet
 		err error
 	}
-	pktCh := make(chan readResult, 512)
+	pktCh := make(chan readResult, 8192)
 
 	go func() {
 		buf := make([]byte, rtpBufSize)
@@ -287,7 +303,7 @@ func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 		}
 	}()
 
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	deliver := func(ordered *rtp.Packet) {
