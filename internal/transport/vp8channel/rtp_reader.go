@@ -17,8 +17,7 @@ import (
 // packet cannot stall delivery indefinitely.
 const (
 	reorderWindow   = 256
-	maxReorderGap   = 16
-	maxReorderDelay = 10 * time.Millisecond
+	maxReorderDelay = 30 * time.Millisecond
 )
 
 // Reordered RTP packets normally carry an MTU-sized payload. Larger buffers
@@ -81,20 +80,17 @@ func (b *reorderBuffer) push(pkt *rtp.Packet, deliver func(*rtp.Packet)) {
 
 	// Holding a full window behind a hole, or waiting longer than maxReorderDelay
 	// for the missing packet, means the head sequence is genuinely lost: skip forward.
-	gap := uint16(pkt.SequenceNumber - b.nextSeq)
-	if gap > maxReorderGap || len(b.pkts) > reorderWindow || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
+	if len(b.pkts) > reorderWindow || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
 		b.skipToOldest()
 		b.gapStartTime = time.Time{}
 	}
 
 	b.drain(deliver)
 
-	// Advance through remaining internal gaps if they exceed limit or timed out
+	// Advance through remaining internal gaps if timed out
 	for len(b.pkts) > 0 {
-		oldest := b.findOldest()
-		remGap := uint16(oldest - b.nextSeq)
-		if remGap > maxReorderGap || (!b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay) {
-			b.nextSeq = oldest
+		if !b.gapStartTime.IsZero() && time.Since(b.gapStartTime) >= maxReorderDelay {
+			b.skipToOldest()
 			b.drain(deliver)
 		} else {
 			break

@@ -23,12 +23,12 @@ const (
 	kcpMTU = 1400
 
 	// Send/receive window in segments. Sized to match the BDP (bandwidth-delay
-	// product) of the SFU channel (~20 Mbps @ 50ms RTT = ~120KB = ~90 segments)
+	// product) of the SFU channel (~25-30 Mbps @ 150-200ms RTT = ~500-600KB)
 	// with moderate headroom. Bounding the window prevents massive bufferbloat
 	// in the outbound queue that would artificially inflate RTT and trigger
 	// premature retransmissions.
-	kcpSndWnd = 256
-	kcpRcvWnd = 256
+	kcpSndWnd = 512
+	kcpRcvWnd = 512
 
 	// Length prefix for our message framing on top of KCP stream mode.
 	// We use stream mode because UDPSession.Write fragments messages > MSS
@@ -67,15 +67,15 @@ func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrL
 		return nil, fmt.Errorf("kcp new conn: %w", err)
 	}
 
-	// nodelay=1, interval=5ms, fast resend=2, congestion control OFF (nc=1).
+	// nodelay=1, interval=2ms, fast resend=2, congestion control OFF (nc=1).
 	// The frame ticker already paces emission at the VP8 frame cadence, so the
-	// 5ms KCP tick just keeps scheduling latency low; a slower tick only adds
+	// 2ms KCP tick just keeps scheduling latency low; a slower tick only adds
 	// dead time before retransmits and ACKs. nc=1 disables KCP's loss-based
 	// congestion control because the provider is a hard policer, not a fair
 	// queue: with nc=0 the unavoidable ~4% drops collapsed cwnd and starved
 	// the wire. With nc=1 KCP keeps the window full and retransmits the few
 	// losses, letting throughput reach the SFU's real ceiling.
-	sess.SetNoDelay(1, 5, 2, 1)
+	sess.SetNoDelay(1, 2, 2, 1)
 	sess.SetWindowSize(kcpSndWnd, kcpRcvWnd)
 	sess.SetMtu(kcpMTU)
 	// Upstream marked SetStreamMode deprecated without providing a replacement;

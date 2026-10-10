@@ -8,12 +8,12 @@ import (
 )
 
 const (
-	maxBatchSampleSize    = 4 * 1024
-	defaultSampleInterval = 2 * time.Millisecond
+	maxBatchSampleSize    = 8192
+	defaultSampleInterval = 16 * time.Millisecond
 )
 
 func (p *streamTransport) sampleInterval() time.Duration {
-	if p.frameInterval > 0 && p.frameInterval < defaultSampleInterval {
+	if p.frameInterval > 0 {
 		return p.frameInterval
 	}
 	return defaultSampleInterval
@@ -187,9 +187,8 @@ func (p *streamTransport) writerLoop() {
 
 // peerWriterPump drains a peer's outbound KCP queue and writes frames to the
 // shared video track on the paced sample interval, batching queued frames
-// into small VP8 samples per tick. Small samples prevent multi-packet frame
-// fragmentation and token bucket drops on the SFU. Stops when the peer
-// session is released or the transport shuts down.
+// into VP8 samples per tick. Stops when the peer session is released or the
+// transport shuts down.
 func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan struct{}) {
 	interval := p.sampleInterval()
 	ticker := time.NewTicker(interval)
