@@ -16,6 +16,7 @@ import (
 
 func (s *Session) sendHello() error {
 	peerID, roomID, credentials := s.joinCredentials()
+	hasSharing := s.VideoTracksCount() > 1
 	hello := map[string]any{
 		keyUID: uuid.New().String(),
 		"hello": map[string]any{
@@ -33,7 +34,7 @@ func (s *Session) sendHello() error {
 			},
 			"sendAudio":         false,
 			"sendVideo":         s.hasLocalVideoTracks(),
-			"sendSharing":       false,
+			"sendSharing":       hasSharing,
 			"participantId":     peerID,
 			"roomId":            roomID,
 			"serviceName":       "telemost",

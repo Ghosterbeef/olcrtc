@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
@@ -125,6 +126,9 @@ type streamTransport struct {
 
 	stream videoSession
 	track  *webrtc.TrackLocalStaticSample
+	tracks []*webrtc.TrackLocalStaticSample
+	writeTrackIndex atomic.Uint32
+
 	// writeMu serializes all track.WriteSample calls. pion's WriteSample is
 	// not safe for concurrent use (see writeSampleLocked); the server writes
 	// bulk data from per-peer pumps while writerLoop writes control frames
@@ -225,23 +229,34 @@ func New(ctx context.Context, cfg transport.Config) (transport.Transport, error)
 		return nil, fmt.Errorf("open video session: %w", err)
 	}
 
-	track, err := common.NewVideoTrack(webrtc.RTPCodecCapability{
-		MimeType:  webrtc.MimeTypeVP8,
-		ClockRate: 90000,
-	}, "vp8channel")
-	if err != nil {
-		return nil, fmt.Errorf("build video track: %w", err)
+	numTracks := opts.Tracks
+	tracks := make([]*webrtc.TrackLocalStaticSample, numTracks)
+	for i := range numTracks {
+		trackName := "vp8channel"
+		if numTracks > 1 {
+			trackName = fmt.Sprintf("vp8channel-%d", i)
+		}
+		t, err := common.NewVideoTrack(webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeVP8,
+			ClockRate: 90000,
+		}, trackName)
+		if err != nil {
+			return nil, fmt.Errorf("build video track %d: %w", i, err)
+		}
+		tracks[i] = t
 	}
 
-	tr := newStreamTransport(stream, track, cfg, opts)
+	tr := newStreamTransport(stream, tracks, cfg, opts)
 
-	wrappedTrack := &vp8Track{
-		TrackLocalStaticSample: track,
-		transport:              tr,
-	}
+	for i, t := range tracks {
+		wrappedTrack := &vp8Track{
+			TrackLocalStaticSample: t,
+			transport:              tr,
+		}
 
-	if err := stream.AddTrack(wrappedTrack); err != nil {
-		return nil, fmt.Errorf("attach local video track: %w", err)
+		if err := stream.AddTrack(wrappedTrack); err != nil {
+			return nil, fmt.Errorf("attach local video track %d: %w", i, err)
+		}
 	}
 	stream.SetTrackHandler(tr.handleRemoteTrack)
 
@@ -250,14 +265,19 @@ func New(ctx context.Context, cfg transport.Config) (transport.Transport, error)
 
 func newStreamTransport(
 	stream videoSession,
-	track *webrtc.TrackLocalStaticSample,
+	tracks []*webrtc.TrackLocalStaticSample,
 	cfg transport.Config,
 	opts Options,
 ) *streamTransport {
+	var firstTrack *webrtc.TrackLocalStaticSample
+	if len(tracks) > 0 {
+		firstTrack = tracks[0]
+	}
 	tr := &streamTransport{
 		Lifecycle:        common.NewLifecycle(stream),
 		stream:           stream,
-		track:            track,
+		track:            firstTrack,
+		tracks:           tracks,
 		onData:           cfg.OnData,
 		onPeerData:       cfg.OnPeerData,
 		serverMode:       cfg.OnPeerData != nil,
@@ -291,7 +311,23 @@ func (p *streamTransport) RequestKeyFrame() {
 
 func (p *streamTransport) emitKeyframe() {
 	hdr := p.epochHeader()
-	_ = p.writeSampleLocked(hdr[:])
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if p.sampleWriter != nil {
+		_ = p.sampleWriter(hdr[:])
+	} else if len(p.tracks) > 0 {
+		for _, t := range p.tracks {
+			_ = t.WriteSample(media.Sample{
+				Data:     hdr[:],
+				Duration: p.sampleInterval(),
+			})
+		}
+	} else if p.track != nil {
+		_ = p.track.WriteSample(media.Sample{
+			Data:     hdr[:],
+			Duration: p.sampleInterval(),
+		})
+	}
 	p.lastKeyframeNano.Store(time.Now().UnixNano())
 }
 

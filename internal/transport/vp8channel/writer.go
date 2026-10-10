@@ -19,6 +19,19 @@ func (p *streamTransport) sampleInterval() time.Duration {
 	return defaultSampleInterval
 }
 
+func (p *streamTransport) effectiveTickInterval() time.Duration {
+	interval := p.sampleInterval()
+	n := len(p.tracks)
+	if n <= 1 {
+		return interval
+	}
+	tick := interval / time.Duration(n)
+	if tick <= 0 {
+		return time.Millisecond
+	}
+	return tick
+}
+
 // writerState holds the per-loop bookkeeping for writerLoop, extracted so the
 // loop body stays within cognitive-complexity limits.
 type writerState struct {
@@ -61,16 +74,25 @@ func (w *writerState) writeSample(data []byte) bool {
 // sample's packetize+send atomic and keeps sequence numbers monotonic. Pion's
 // VP8 payloader copies sample.Data into RTP payloads during Packetize, before
 // WriteSample returns, so the writer can release its packet buffer afterward.
+// When multiple tracks are configured (MIMO), writes alternate between tracks
+// in round-robin fashion, each maintaining its own valid VP8 sequence.
 func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	if p.sampleWriter != nil {
 		return p.sampleWriter(data)
 	}
-	if p.track == nil {
-		return false
+	if len(p.tracks) == 0 {
+		if p.track == nil {
+			return false
+		}
+		return p.track.WriteSample(media.Sample{
+			Data:     data,
+			Duration: p.sampleInterval(),
+		}) == nil
 	}
-	return p.track.WriteSample(media.Sample{
+	idx := int(p.writeTrackIndex.Add(1)-1) % len(p.tracks)
+	return p.tracks[idx].WriteSample(media.Sample{
 		Data:     data,
 		Duration: p.sampleInterval(),
 	}) == nil
@@ -90,8 +112,7 @@ func (w *writerState) forceKeepalive() {
 	if force || lastNano == 0 || time.Since(last) >= forceKeepalivePeriod {
 		w.p.lastKeyframeNano.Store(time.Now().UnixNano())
 		w.ticksSinceKeepalive = 0
-		hdr := w.p.epochHeader()
-		_ = w.writeSample(hdr[:])
+		w.p.emitKeyframe()
 	}
 }
 
@@ -137,8 +158,7 @@ func (w *writerState) drainData() {
 		w.idleTicks++
 		if w.idleTicks >= w.keepaliveEvery {
 			w.idleTicks = 0
-			hdr := w.p.epochHeader()
-			_ = w.writeSample(hdr[:])
+			w.p.emitKeyframe()
 		}
 		return
 	}
@@ -157,7 +177,7 @@ func (w *writerState) drainData() {
 func (p *streamTransport) writerLoop() {
 	defer close(p.writerDone)
 
-	interval := p.sampleInterval()
+	interval := p.effectiveTickInterval()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -190,7 +210,7 @@ func (p *streamTransport) writerLoop() {
 // into VP8 samples per tick. Stops when the peer session is released or the
 // transport shuts down.
 func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan struct{}) {
-	interval := p.sampleInterval()
+	interval := p.effectiveTickInterval()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -214,8 +234,7 @@ func (p *streamTransport) peerWriterPump(out chan *packetBuffer, done <-chan str
 			last := time.Unix(0, lastNano)
 			if force || lastNano == 0 || time.Since(last) >= forceKeepalivePeriod {
 				p.lastKeyframeNano.Store(time.Now().UnixNano())
-				hdr := p.epochHeader()
-				_ = p.writeSampleLocked(hdr[:])
+				p.emitKeyframe()
 			}
 			frame := pending
 			pending = nil

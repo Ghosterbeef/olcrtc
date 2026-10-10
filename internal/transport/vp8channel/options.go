@@ -7,12 +7,15 @@ import (
 const (
 	defaultFPS       = 30
 	defaultBatchSize = 64
+	defaultTracks    = 1
+	maxTracks        = 8
 )
 
 // Options tunes the vp8channel transport. Zero values fall back to documented defaults.
 type Options struct {
 	FPS       int
 	BatchSize int
+	Tracks    int
 }
 
 // TransportOptions marks Options as belonging to the transport options family.
@@ -26,6 +29,12 @@ func (o Options) withDefaults() Options {
 	o.FPS = transport.NormalizeFPS(o.FPS, defaultFPS)
 	if o.BatchSize <= 0 {
 		o.BatchSize = defaultBatchSize
+	}
+	if o.Tracks <= 0 {
+		o.Tracks = defaultTracks
+	}
+	if o.Tracks > maxTracks {
+		o.Tracks = maxTracks
 	}
 	return o
 }

@@ -27,6 +27,7 @@ func buildTransportOptions(cfg Config) transport.Options {
 		return vp8channel.Options{
 			FPS:       cfg.VP8.FPS,
 			BatchSize: cfg.VP8.BatchSize,
+			Tracks:    cfg.VP8.Tracks,
 		}
 	case transportSEI:
 		return seichannel.Options{

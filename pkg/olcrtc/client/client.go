@@ -41,6 +41,7 @@ func (VideoOptions) transportOptions() {}
 type VP8Options struct {
 	FPS       int
 	BatchSize int
+	Tracks    int
 }
 
 func (VP8Options) transportOptions() {}

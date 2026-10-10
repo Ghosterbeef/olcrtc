@@ -327,6 +327,10 @@ func (s *Session) publisherTrackDescriptions() []map[string]any {
 		if track.Kind() == webrtc.RTPCodecTypeAudio {
 			kind = "AUDIO"
 		}
+		desc := ""
+		if len(tracks) > 0 && kind == "VIDEO" {
+			desc = "screenshare"
+		}
 		tracks = append(tracks, map[string]any{
 			"mid":            transceiver.Mid(),
 			"transceiverMid": transceiver.Mid(),
@@ -335,7 +339,7 @@ func (s *Session) publisherTrackDescriptions() []map[string]any {
 			"label":          track.ID(),
 			"codecs":         map[string]any{},
 			"groupId":        1,
-			keyDescription:   "",
+			keyDescription:   desc,
 		})
 	}
 	return tracks

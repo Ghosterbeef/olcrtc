@@ -6,6 +6,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
+	"github.com/openlibrecommunity/olcrtc/internal/transport"
+	"github.com/openlibrecommunity/olcrtc/internal/transport/common"
 )
 
 func pumpPackets(stop <-chan struct{}, from <-chan *packetBuffer, to *kcpRuntime) {
@@ -315,5 +319,35 @@ func TestHandleIncomingFrameIgnoresForeignBindingToken(t *testing.T) {
 	}
 	if got := stream.reconnects.Load(); got != 0 {
 		t.Fatalf("provider rebuilt on foreign frame: got %d want 0", got)
+	}
+}
+
+func TestMultiTrackMIMO(t *testing.T) {
+	stream := &fakeVideoStream{canSend: true}
+	track1, err := common.NewVideoTrack(webrtc.RTPCodecCapability{
+		MimeType:  webrtc.MimeTypeVP8,
+		ClockRate: 90000,
+	}, "track1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	track2, err := common.NewVideoTrack(webrtc.RTPCodecCapability{
+		MimeType:  webrtc.MimeTypeVP8,
+		ClockRate: 90000,
+	}, "track2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr := newStreamTransport(stream, []*webrtc.TrackLocalStaticSample{track1, track2}, transport.Config{}, Options{FPS: 60, Tracks: 2})
+
+	if len(tr.tracks) != 2 {
+		t.Fatalf("expected 2 tracks, got %d", len(tr.tracks))
+	}
+
+	// 60 FPS (16.6ms) / 2 tracks = ~8ms effective tick interval
+	wantTick := tr.sampleInterval() / 2
+	if got := tr.effectiveTickInterval(); got != wantTick {
+		t.Fatalf("effectiveTickInterval = %v, want %v", got, wantTick)
 	}
 }

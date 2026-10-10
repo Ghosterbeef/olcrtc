@@ -148,6 +148,7 @@ type Video struct {
 type VP8 struct {
 	FPS       int `yaml:"fps"`
 	BatchSize int `yaml:"batch_size"`
+	Tracks    int `yaml:"tracks"`
 }
 
 // SEI tunes the seichannel transport.
@@ -318,6 +319,7 @@ func ApplySettings(dst session.Config, s Settings) session.Config {
 
 	dst.VP8.FPS = overlay(dst.VP8.FPS, s.VP8.FPS)
 	dst.VP8.BatchSize = overlay(dst.VP8.BatchSize, s.VP8.BatchSize)
+	dst.VP8.Tracks = overlay(dst.VP8.Tracks, s.VP8.Tracks)
 
 	dst.SEI.FPS = overlay(dst.SEI.FPS, s.SEI.FPS)
 	dst.SEI.BatchSize = overlay(dst.SEI.BatchSize, s.SEI.BatchSize)

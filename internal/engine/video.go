@@ -41,6 +41,13 @@ func (s *VideoTrackState) HasVideoTracks() bool {
 	return len(s.tracks) > 0
 }
 
+// VideoTracksCount returns the number of registered local video tracks.
+func (s *VideoTrackState) VideoTracksCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tracks)
+}
+
 // WantsVideo reports whether local or remote video is configured.
 func (s *VideoTrackState) WantsVideo() bool {
 	s.mu.RLock()
