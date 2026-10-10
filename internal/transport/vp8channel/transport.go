@@ -68,7 +68,7 @@ const (
 	// to a couple of send windows so KCP's flush never blocks (a blocked
 	// WriteTo would stall KCP's update loop and delay ACKs); the paced writer
 	// keeps it drained so this depth is headroom, not standing latency.
-	outboundQueueSize = 1024
+	outboundQueueSize = 512
 	// controlOutboundQueueSize is the queue for the control-plane KCP.
 	// Control messages are tiny (ping/pong JSON frames), so a small queue
 	// suffices. We keep it separate from bulk data to guarantee forward
@@ -124,9 +124,9 @@ func (t *vp8Track) RequestKeyFrame() {
 type streamTransport struct {
 	common.Lifecycle
 
-	stream videoSession
-	track  *webrtc.TrackLocalStaticSample
-	tracks []*webrtc.TrackLocalStaticSample
+	stream          videoSession
+	track           *webrtc.TrackLocalStaticSample
+	tracks          []*webrtc.TrackLocalStaticSample
 	writeTrackIndex atomic.Uint32
 
 	// writeMu serializes all track.WriteSample calls. pion's WriteSample is

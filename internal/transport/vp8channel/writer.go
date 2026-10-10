@@ -8,12 +8,12 @@ import (
 )
 
 const (
-	maxBatchSampleSize    = 8192
-	defaultSampleInterval = 16 * time.Millisecond
+	maxBatchSampleSize    = 4 * 1024
+	defaultSampleInterval = 2 * time.Millisecond
 )
 
 func (p *streamTransport) sampleInterval() time.Duration {
-	if p.frameInterval > 0 {
+	if p.frameInterval > 0 && p.frameInterval < defaultSampleInterval {
 		return p.frameInterval
 	}
 	return defaultSampleInterval
