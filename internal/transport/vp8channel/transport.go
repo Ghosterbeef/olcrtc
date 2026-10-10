@@ -319,13 +319,13 @@ func (p *streamTransport) emitKeyframe() {
 		for _, t := range p.tracks {
 			_ = t.WriteSample(media.Sample{
 				Data:     hdr[:],
-				Duration: p.sampleInterval(),
+				Duration: p.effectiveTrackDuration(),
 			})
 		}
 	} else if p.track != nil {
 		_ = p.track.WriteSample(media.Sample{
 			Data:     hdr[:],
-			Duration: p.sampleInterval(),
+			Duration: p.effectiveTrackDuration(),
 		})
 	}
 	p.lastKeyframeNano.Store(time.Now().UnixNano())

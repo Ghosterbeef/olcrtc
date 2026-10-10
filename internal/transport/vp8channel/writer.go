@@ -32,6 +32,14 @@ func (p *streamTransport) effectiveTickInterval() time.Duration {
 	return tick
 }
 
+func (p *streamTransport) effectiveTrackDuration() time.Duration {
+	n := len(p.tracks)
+	if n <= 1 {
+		return p.sampleInterval()
+	}
+	return p.effectiveTickInterval() * time.Duration(n)
+}
+
 // writerState holds the per-loop bookkeeping for writerLoop, extracted so the
 // loop body stays within cognitive-complexity limits.
 type writerState struct {
@@ -94,7 +102,7 @@ func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	idx := int(p.writeTrackIndex.Add(1)-1) % len(p.tracks)
 	return p.tracks[idx].WriteSample(media.Sample{
 		Data:     data,
-		Duration: p.sampleInterval(),
+		Duration: p.effectiveTrackDuration(),
 	}) == nil
 }
 

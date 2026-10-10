@@ -17,8 +17,8 @@ import (
 // packet cannot stall delivery indefinitely.
 const (
 	reorderWindow   = 256
-	maxReorderGap   = 16
-	maxReorderDelay = 10 * time.Millisecond
+	maxReorderGap   = 128
+	maxReorderDelay = 40 * time.Millisecond
 )
 
 // Reordered RTP packets normally carry an MTU-sized payload. Larger buffers
