@@ -279,11 +279,21 @@ func (r *Runtime) SetTrafficOptions(maxPayloadSize, minDelayMillis, maxDelayMill
 
 // SetVP8Options configures vp8channel.
 func (r *Runtime) SetVP8Options(fps, batchSize int) error {
+	return r.SetVP8TracksOptions(fps, batchSize, 1)
+}
+
+// SetVP8TracksOptions configures vp8channel with multiple MIMO tracks.
+func (r *Runtime) SetVP8TracksOptions(fps, batchSize, tracks int) error {
 	if fps < 1 || fps > 120 || batchSize < 1 {
 		return fmt.Errorf("%w: invalid VP8 options", ErrInvalidConfig)
 	}
+	if tracks < 1 {
+		tracks = 1
+	} else if tracks > 8 {
+		tracks = 8
+	}
 	r.mu.Lock()
-	r.defaults.vp8 = client.VP8Options{FPS: fps, BatchSize: batchSize}
+	r.defaults.vp8 = client.VP8Options{FPS: fps, BatchSize: batchSize, Tracks: tracks}
 	r.mu.Unlock()
 	return nil
 }
