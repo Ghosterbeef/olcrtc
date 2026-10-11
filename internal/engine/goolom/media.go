@@ -314,6 +314,7 @@ func (s *Session) publisherTrackDescriptions() []map[string]any {
 		return nil
 	}
 	tracks := make([]map[string]any, 0)
+	videoIdx := 0
 	for _, transceiver := range pub.GetTransceivers() {
 		sender := transceiver.Sender()
 		if sender == nil {
@@ -329,7 +330,12 @@ func (s *Session) publisherTrackDescriptions() []map[string]any {
 		}
 		desc := ""
 		if kind == "VIDEO" {
-			desc = "screenshare"
+			if videoIdx == 0 {
+				desc = "screenshare"
+			} else {
+				desc = ""
+			}
+			videoIdx++
 		}
 		tracks = append(tracks, map[string]any{
 			"mid":            transceiver.Mid(),

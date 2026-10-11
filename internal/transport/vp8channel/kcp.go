@@ -55,7 +55,12 @@ type kcpRuntime struct {
 	closeOnce sync.Once
 }
 
-func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrLen]byte) (*kcpRuntime, error) {
+func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrLen]byte, tracks ...int) (*kcpRuntime, error) {
+	numTracks := 1
+	if len(tracks) > 0 && tracks[0] > 0 {
+		numTracks = tracks[0]
+	}
+
 	c := newKCPConn(out, inboundQueueSize, epochHdr)
 
 	sess, err := kcp.NewConn3(kcpConvID, fakeUDPAddr(), nil, 0, 0, c)
@@ -64,15 +69,16 @@ func startKCP(out chan<- *packetBuffer, onData func([]byte), epochHdr [epochHdrL
 		return nil, fmt.Errorf("kcp new conn: %w", err)
 	}
 
-	// nodelay=1, interval=5ms, fast resend=2, congestion control OFF (nc=1).
-	// The frame ticker already paces emission at the VP8 frame cadence, so the
-	// 5ms KCP tick just keeps scheduling latency low; a slower tick only adds
-	// dead time before retransmits and ACKs. nc=1 disables KCP's loss-based
-	// congestion control because the provider is a hard policer, not a fair
-	// queue: with nc=0 the unavoidable ~4% drops collapsed cwnd and starved
-	// the wire. With nc=1 KCP keeps the window full and retransmits the few
-	// losses, letting throughput reach the SFU's real ceiling.
-	sess.SetNoDelay(1, 5, 2, 1)
+	// nodelay=1, interval=5ms, congestion control OFF (nc=1).
+	// With single track, fast resend=2 triggers rapid recovery on packet loss.
+	// With MIMO (tracks > 1), inter-track jitter and burst multiplexing cause
+	// harmless minor packet reordering. A threshold of resend=8 prevents spurious
+	// fast-retransmit storms while still detecting genuine packet loss.
+	resend := 2
+	if numTracks > 1 {
+		resend = 8
+	}
+	sess.SetNoDelay(1, 5, resend, 1)
 	sess.SetWindowSize(kcpSndWnd, kcpRcvWnd)
 	sess.SetMtu(kcpMTU)
 	// Upstream marked SetStreamMode deprecated without providing a replacement;
@@ -172,6 +178,7 @@ func (r *kcpRuntime) close() {
 type kcpPlane struct {
 	out    chan *packetBuffer
 	onData func([]byte)
+	tracks int
 
 	// lifecycleMu serializes start/restart/close. Without it two concurrent
 	// restarts - a provider reconnect and an upper-layer ResetPeer fire
@@ -187,8 +194,12 @@ type kcpPlane struct {
 	once sync.Once
 }
 
-func newKCPPlane(queueSize int, onData func([]byte)) *kcpPlane {
-	return &kcpPlane{out: make(chan *packetBuffer, queueSize), onData: onData}
+func newKCPPlane(queueSize int, onData func([]byte), tracks ...int) *kcpPlane {
+	numTracks := 1
+	if len(tracks) > 0 && tracks[0] > 0 {
+		numTracks = tracks[0]
+	}
+	return &kcpPlane{out: make(chan *packetBuffer, queueSize), onData: onData, tracks: numTracks}
 }
 
 // get returns the live runtime, or nil when the plane has not started (or is
@@ -222,7 +233,7 @@ func (p *kcpPlane) start(hdr [epochHdrLen]byte) (bool, error) {
 			return
 		}
 		var rt *kcpRuntime
-		rt, err = startKCP(p.out, p.onData, hdr)
+		rt, err = startKCP(p.out, p.onData, hdr, p.tracks)
 		if err != nil {
 			return
 		}
@@ -254,7 +265,7 @@ func (p *kcpPlane) restart(hdr [epochHdrLen]byte) {
 		old.close()
 	}
 
-	rt, err := startKCP(p.out, p.onData, hdr)
+	rt, err := startKCP(p.out, p.onData, hdr, p.tracks)
 	if err != nil {
 		return
 	}

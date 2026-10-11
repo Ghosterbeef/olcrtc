@@ -294,7 +294,7 @@ func newStreamTransport(
 		if tr.onData != nil {
 			tr.onData(data)
 		}
-	})
+	}, len(tracks))
 	tr.control = newKCPPlane(controlOutboundQueueSize, tr.deliverControlData)
 
 	tr.shaper = transport.NewShaper(cfg.Traffic, tr.Features())

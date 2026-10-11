@@ -10,6 +10,7 @@ import (
 const (
 	maxBatchSampleSize    = 4 * 1024
 	defaultSampleInterval = 2 * time.Millisecond
+	trackBurstSamples     = 8
 )
 
 func (p *streamTransport) sampleInterval() time.Duration {
@@ -83,7 +84,7 @@ func (w *writerState) writeSample(data []byte) bool {
 // VP8 payloader copies sample.Data into RTP payloads during Packetize, before
 // WriteSample returns, so the writer can release its packet buffer afterward.
 // When multiple tracks are configured (MIMO), writes alternate between tracks
-// in round-robin fashion, each maintaining its own valid VP8 sequence.
+// in bursts (trackBurstSamples) to avoid per-sample out-of-order retransmits.
 func (p *streamTransport) writeSampleLocked(data []byte) bool {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
@@ -99,7 +100,7 @@ func (p *streamTransport) writeSampleLocked(data []byte) bool {
 			Duration: p.sampleInterval(),
 		}) == nil
 	}
-	idx := int(p.writeTrackIndex.Add(1)-1) % len(p.tracks)
+	idx := (int(p.writeTrackIndex.Add(1)-1) / trackBurstSamples) % len(p.tracks)
 	return p.tracks[idx].WriteSample(media.Sample{
 		Data:     data,
 		Duration: p.effectiveTrackDuration(),
