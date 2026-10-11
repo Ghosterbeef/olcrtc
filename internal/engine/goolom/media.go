@@ -328,7 +328,7 @@ func (s *Session) publisherTrackDescriptions() []map[string]any {
 			kind = "AUDIO"
 		}
 		desc := ""
-		if len(tracks) > 0 && kind == "VIDEO" {
+		if kind == "VIDEO" {
 			desc = "screenshare"
 		}
 		tracks = append(tracks, map[string]any{
